@@ -417,6 +417,59 @@ def judge_trash(image_urls: list) -> list:
     return results
 
 
+def get_prefeture(data):
+    import json
+    from google.cloud import bigquery
+
+    # BigQueryクライアントの初期化（プロジェクトIDを指定）
+    client = bigquery.Client(project="m2m-core")
+
+    # 内部関数：1件のレコードを処理する
+    def process_record(record):
+        # 引数recordからcommon_area_idを取得
+        common_area_id = record.get("common_area_id")
+        if not common_area_id:
+            raise ValueError("recordにcommon_area_idが含まれていません。")
+
+        # SQLクエリ：該当するcommon_area_idのレコードの都道府県部分を抽出
+        query = f"""
+        SELECT 
+          REGEXP_EXTRACT(address, r'^(.*?[都道府県])') AS prefecture
+        FROM `m2m-core.m2m_cleaning_prod.placement_records`
+        WHERE common_area_id = '{common_area_id}'
+        LIMIT 1
+        """
+
+        # クエリ実行
+        query_job = client.query(query)
+        results = query_job.result()
+
+        # 結果が見つかった場合、その都道府県部分を取得
+        prefecture = None
+        for row in results:
+            prefecture = row.prefecture
+            break
+
+        # recordにprefectureキーを追加
+        record["prefecture"] = prefecture
+        return record
+
+    # 引数がリストの場合、各レコードを処理する
+    if isinstance(data, list):
+        processed = [process_record(record) for record in data]
+    # 辞書の場合はそのまま処理
+    elif isinstance(data, dict):
+        processed = process_record(data)
+    else:
+        raise ValueError("dataは辞書または辞書のリストでなければなりません。")
+
+    # JSON形式で結果を出力（日本語をそのまま表示）
+    json_output = json.dumps(processed, ensure_ascii=False, indent=2)
+    print(json_output)
+
+    return processed
+
+
 import json
 from datetime import datetime, timedelta
 from google.auth.transport.requests import Request
@@ -425,7 +478,7 @@ from googleapiclient.discovery import build
 import os
 
 # Google Sheets APIの設定
-SERVICE_ACCOUNT_FILE = 'm2m-core-08fd5de67ae7.json'  # アップロードしたJSONキーのパス
+SERVICE_ACCOUNT_FILE = 'm2m-core-d84008adb45d.json'  # アップロードしたJSONキーのパス
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # サービスアカウントを使用して認証
@@ -527,7 +580,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # Google Sheets APIの設定
-SERVICE_ACCOUNT_FILE = 'm2m-core-08fd5de67ae7.json'  # サービスアカウントのJSONキーのパス
+SERVICE_ACCOUNT_FILE = 'm2m-core-d84008adb45d.json'  # サービスアカウントのJSONキーのパス
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # サービスアカウントを使用して認証
@@ -773,36 +826,46 @@ def insert_results_to_bigquery(results):
 
 
 def arrange_making_tour_data(data):
-    # judgments内に result が "〇" または 1 のレコードのみを抽出
+    """
+    judgments 内に result が "〇" または 1 のレコードのみを抽出し、
+    該当レコードの common_area_id と prefecture のペアを辞書形式のリストで返す関数。
+    例:
+      [
+        { "common_area_id": "01H3DM2893SJ7W3ZN2R718JS33", "prefecture": "東京都" },
+        { "common_area_id": "01J92P2XA103MG684VS1NZBD5E", "prefecture": "大阪府" }
+      ]
+    """
     filtered_records = []
     for record in data:
         judgments = record.get("judgments", [])
         for judgment in judgments:
-            # judgment の result が "〇" または 1 なら対象のレコードを採用
             if judgment.get("result") == "〇" or judgment.get("result") == 1:
                 filtered_records.append(record)
                 break
 
-    # filtered_records から common_area_id のみを抜き出す
-    common_area_ids = [record.get("common_area_id") for record in filtered_records]
+    common_area_info = []
+    for record in filtered_records:
+        common_area_id = record.get("common_area_id")
+        prefecture = record.get("prefecture")
+        if common_area_id:
+            common_area_info.append({
+                "common_area_id": common_area_id,
+                "prefecture": prefecture
+            })
 
-    print("抽出されたcommon_area_id:")
-    print(common_area_ids)
+    print("抽出された common_area_info:")
+    print(common_area_info)
     
-    # ここで結果を返す
-    return common_area_ids
+    return common_area_info
 
 
-
-
-# ---------------------------
-# ② 回収ツアー作成 API を呼び出す処理（抽出された common_area_ids を利用）
-# ---------------------------
-
-# Google Sheets API を使わない場合、ここでは単純にAPIリクエストを送信する例とします。
-
-
-def making_tour(common_area_ids):
+def making_tour(common_area_info):
+    """
+    各 common_area_info のレコードごとに API リクエストを実行し、
+    prefecture が "大阪府" の場合、cleaners の値を
+    ["7903b3e8-923f-4f87-b5bb-3fee0a754d7c"] に変更する。
+    それ以外はデフォルトの ["71461896-b63f-49de-a522-7b86671b6bbc"] を使用する。
+    """
     try:
         print("makingTour 実行開始")
         token = get_api_token()
@@ -811,8 +874,7 @@ def making_tour(common_area_ids):
             raise Exception("トークン取得失敗")
         print("トークン取得成功:", token)
         
-        # common_area_ids は文字列のリストなので、その件数を直接取得
-        print("抽出された commonAreaIds の件数:", len(common_area_ids))
+        print("抽出された common_area_info の件数:", len(common_area_info))
         
         # 明日の日付を JST で取得（yyyy-MM-dd形式）
         import pytz
@@ -821,24 +883,34 @@ def making_tour(common_area_ids):
         cleaning_date = tomorrow.strftime("%Y-%m-%d")
         print("明日の日付:", cleaning_date)
         
-        # 各 common_area_id ごとに API リクエストを実行
-        for idx, common_area_id in enumerate(common_area_ids, start=2):
+        # 各 common_area_info のレコードごとに API リクエストを実行
+        for idx, info in enumerate(common_area_info, start=2):
+            common_area_id = info.get("common_area_id")
+            prefecture = info.get("prefecture")
             if not common_area_id:
                 print(f"commonAreaId が空のためスキップ (idx: {idx})")
                 continue
-            print(f"処理中: commonAreaId = {common_area_id}")
-            note = ("ストッカー内・ゴミ庫内の清掃をしてください。水栓が使用できる場合は使用して、"
-                    "ストッカー底面やゴミ庫の床の清掃もお願いします")
+            print(f"処理中: commonAreaId = {common_area_id}, prefecture = {prefecture}")
+            note = (
+                "ストッカー内・ゴミ庫内の清掃をしてください。水栓が使用できる場合は使用して、"
+                "ストッカー底面やゴミ庫の床の清掃もお願いします"
+            )
             api_url = "https://api-cleaning.m2msystems.cloud/v3/cleanings/create_with_placement"
+            
+            # prefecture によって cleaners を決定する
+            cleaners = ["71461896-b63f-49de-a522-7b86671b6bbc"]
+            if prefecture == "大阪府":
+                cleaners = ["7903b3e8-923f-4f87-b5bb-3fee0a754d7c"]
+
             payload = {
                 "placement": "commonArea",
                 "commonAreaId": common_area_id,
                 "listingId": "",
                 "cleaningDate": cleaning_date,
                 "note": note,
-                "cleaners": ["71461896-b63f-49de-a522-7b86671b6bbc"], ##適当なアサインを当てはめてください
+                "cleaners": cleaners,
                 "submissionId": "",
-                "photoTourId": "63534d08-f83b-4b3d-bd0c-0660be6ea3cb" ##適当なツアーを当てはめてください
+                "photoTourId": "63534d08-f83b-4b3d-bd0c-0660be6ea3cb"
             }
             headers = {
                 "Authorization": "Bearer " + token,
@@ -849,15 +921,12 @@ def making_tour(common_area_ids):
                 print(f"APIレスポンス (common_area_id={common_area_id}):", response.text)
             except Exception as error:
                 print("APIリクエストでエラーが発生しました:", str(error))
-        print("処理終了")
+        print("makingTour 処理終了")
     except Exception as e:
-        print("エラーが発生しました:", str(e))
-
-
+        print("makingTour エラーが発生しました:", str(e))
 
 
 def main():
-    # ここにプログラムの主要な処理を記述します
     print("プログラムが開始されました。")
 
     # 例: トークンの取得
@@ -869,100 +938,86 @@ def main():
     # 例: 当日の清掃データの取得
     target_photo_tour_id = "0a8b54c9-1d99-460b-9085-4bdfe56af9ce"
     filtered_cleanings = get_today_cleanings(token, target_photo_tour_id)
-
-    # 例: filtered_cleanings の数をログで表示
     print(f"[INFO] 本日のゴミ状況チェックツアーの数: {len(filtered_cleanings)}")
 
-    # 例: filtered_cleanings の内容をログで表示
     if filtered_cleanings:
         print("[INFO] 本日のゴミ状況チェックツアーの詳細:")
         for cleaning in filtered_cleanings:
             print(cleaning)
-
-    if not filtered_cleanings:
+    else:
         print("[ERROR] 本日のゴミ状況チェックツアーが見つかりませんでした")
         return
 
-    # 例: placement_recordsの取得
+    # placement_records の取得
     placement_data = get_collecting_and_commonarea_id()
-
-    # 例: 各清掃データにplacement情報を追加
+    # 各清掃データに placement 情報を追加
     enriched_cleanings = add_collecting_and_commonarea_id(filtered_cleanings, placement_data)
-
-    # 例: 明日の日付に基づいてtomorrow_column_valueがNoneでないデータを除外
+    # 明日の日付に基づいて tomorrow_column_value が None でないデータを除外
     classificated_cleanings = filter_cleanings_by_tomorrow_column_value(enriched_cleanings)
-
     filtered_cleanings = classificated_cleanings[0]
     excluded_cleanings = classificated_cleanings[1]
 
     print(f"[INFO] 明日回収作業が行われないゴミチェックツアーの数: {len(filtered_cleanings)}")
     print(filtered_cleanings)
 
-    # 例: 複数の清掃に対して画像URLを追加
+    # 複数の清掃データに対して画像URLを追加
     ai_data = enrich_multiple_cleanings_with_images(token, filtered_cleanings)
-
     if not ai_data:
         print("[ERROR] No AI data available after enrichment.")
         return
 
-    # 例: 画像URLのカウント
     total_images = sum(len(cleaning.get("urls", [])) for cleaning in ai_data)
     print(f"[INFO] 取得した画像は {total_images}枚です")
 
-    # 結果を表示
     print("[INFO] === ai_data の詳細 ===")
     for index, item in enumerate(ai_data):
         print(f"[INFO] --- Item {index + 1} ---")
         print(json.dumps(item, ensure_ascii=False, indent=4))
         print("[INFO] -------------------------")
 
-    # 例: AI判定を行う処理
-    result = []  # 結果を格納するリスト
-
+    # AI判定を実施し、各清掃データに judgments を追加
+    result = []
     for cleaning in ai_data:
         image_urls = cleaning.get("urls", [])
         commonarea_name = cleaning.get("commonAreaName", "不明")
-        type = cleaning.get("type", "不明")
-
         if not image_urls:
             print(f"[INFO] {commonarea_name}の画像がありませんでした。")
-            # 判定結果がない場合でも、ai_dataに情報を追加
-            cleaning["judgments"] = []  # 空のjudgmentsリストを追加
-            result.append(cleaning)  # シートに出力するために追加
-            continue  # 次のcleaningデータに進む
+            cleaning["judgments"] = []
+            result.append(cleaning)
+            continue
 
-        print(f"[INFO] {commonarea_name}の画像を判定中 ")
-
+        print(f"[INFO] {commonarea_name}の画像を判定中")
         judgments = []
         for url in image_urls:
-            # AI結果を取得
             judge_result = judge_trash([url])
             if judge_result:
-                judgments.extend(judge_result)  # 画像ごとに判定結果を追加
+                judgments.extend(judge_result)
+        cleaning["judgments"] = judgments if judgments else []
+        result.append(cleaning)
 
-        # 判定結果をai_dataに追加
-        cleaning["judgments"] = judgments if judgments else []  # 判定結果を追加
-
-        result.append(cleaning)  # シートに出力するために追加
-
-
-    # 例: 結果を最終的に表示または保存する
+    # 各レコードに prefecture 情報を追加
+    result = [get_prefeture(record.copy()) for record in result]
     print("[INFO] result:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
-    print("[INFO]スプレットシートに出力します")
+    print("[INFO] スプレッドシートに出力します")
     write_to_sheet(result)
 
-    print("[INFO]BQにインサートします")
+    print("[INFO] BQにインサートします")
     insert_results_to_bigquery(result)
-    common_area_ids = arrange_making_tour_data(result)
 
+    # making_tour 用の common_area_info（common_area_id と prefecture のペア）を抽出
+    common_area_info = arrange_making_tour_data(result)
 
-    #この関数を有効にすると〇の判定が1つでも出た物件に対してツアーが作成されます
-    making_tour(common_area_ids)
+    print( "[INFO]common_area_info:")
+    print(common_area_info)
+    
+    # common_area_info のみを引数として making_tour を実行
+    # ※ この処理は、〇の判定が1件でも出た物件に対してツアーを作成します
+    # making_tour(common_area_info)
 
+    print("[INFO] すべての処理が完了しました")
 
-    print("[INFO]すべての処理が完了しました")
 
 
 from flask import Flask, request, jsonify
