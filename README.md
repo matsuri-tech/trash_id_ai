@@ -1,5 +1,5 @@
 # trash_id_ai
-ゴミチェックAIを制御するアプリケーション。
+ゴミチェックAIを制御するアプリケーション。/h
 全体を制御するtrash-id-ai-processing、
 ゴミ庫orストッカー判定を行うAIを制御するtrash-id-ai、
 ゴミ庫の回収判定を行うAIを制御するtrash-place-id-ai、
